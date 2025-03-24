@@ -3,6 +3,7 @@
 #include <Arduino_MQTT_Client.h>
 #include <OTA_Firmware_Update.h>
 #include <ThingsBoard.h>
+#include <Server_Side_RPC.h>
 #include <Shared_Attribute_Update.h>
 #include <Attribute_Request.h>
 #include <Espressif_Updater.h>
@@ -16,16 +17,21 @@ SHARED_ATTRIBUTES =
 // Firmware title and version used to compare with remote version, to check if an update is needed.
 // Title needs to be the same and version needs to be different --> downgrading is possible
 constexpr char CURRENT_FIRMWARE_TITLE[] = "TEST";
-constexpr char CURRENT_FIRMWARE_VERSION[] = "0.0.9";
+constexpr char CURRENT_FIRMWARE_VERSION[] = "0.0.0";
 // Maximum amount of retries we attempt to download each firmware chunck over MQTT
 constexpr uint8_t FIRMWARE_FAILURE_RETRIES = 12U;
 // Size of each firmware chunck downloaded over MQTT,
 // increased packet size, might increase download speed
 constexpr uint16_t FIRMWARE_PACKET_SIZE = 32768U;
+//RPC configuration
+constexpr uint8_t MAX_RPC_SUBSCRIPTIONS = 1U;
+constexpr uint8_t MAX_RPC_RESPONSE = 5U;
+constexpr char CONNECTING_MSG[] = "Connecting to: (%s) with token (%s)";
+constexpr char RPC_METHOD[] = "rpc_method";
 
 constexpr char WIFI_SSID[] = "HYPERION";
 constexpr char WIFI_PASSWORD[] = "trung2004";
-constexpr char TOKEN[] = "";
+constexpr char TOKEN[] = " ";
 constexpr char THINGSBOARD_SERVER[] = "app.coreiot.io";
 constexpr uint16_t THINGSBOARD_PORT = 1883U;
 constexpr uint16_t MAX_MESSAGE_SEND_SIZE = 512U;
@@ -40,10 +46,12 @@ WiFiClient espClient;
 // Initalize the Mqtt client instance
 Arduino_MQTT_Client mqttClient(espClient);
 // Initialize used apis
-OTA_Firmware_Update<> ota;
+Server_Side_RPC<MAX_RPC_SUBSCRIPTIONS, MAX_RPC_RESPONSE> rpc;
 Shared_Attribute_Update<1U, MAX_ATTRIBUTES> shared_update;
 Attribute_Request<2U, MAX_ATTRIBUTES> attr_request;
-const std::array<IAPI_Implementation*, 3U> apis = {
+OTA_Firmware_Update<> ota;
+const std::array<IAPI_Implementation*, 4U> apis = {
+    &rpc,
     &shared_update,
     &attr_request,
     &ota
@@ -53,6 +61,7 @@ ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Defa
 // Initalize the Updater client instance used to flash binary to flash memory
 Espressif_Updater<> updater;
 // Statuses for updating
+bool rpc_subscribed = false;
 bool shared_update_subscribed = false;
 bool currentFWSent = false;
 bool updateRequestSent = false;
@@ -92,6 +101,21 @@ void finished_callback(const bool & success) {
 void progress_callback(const size_t & current, const size_t & total) {
   Serial.printf("Progress %.2f%%\n", static_cast<float>(current * 100U) / total);
 }
+void checkForUpdate(void * pvParameters){
+  vTaskDelay(30000);
+  const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
+  Serial.println("Firwmare Update ...");
+  ota.Start_Firmware_Update(callback);
+  vTaskDelete(NULL);
+}
+void handleRequest(const JsonVariantConst &data, JsonDocument &response){
+  Serial.println("Received a RPC request");
+  //Info
+  const size_t jsonSize = Helper::Measure_Json(data);
+  char buffer[jsonSize];
+  serializeJson(data, buffer, jsonSize);
+  Serial.println(buffer);
+}
 void processSharedAttributeUpdate(const JsonObjectConst &data) {
   //Info
   const size_t jsonSize = Helper::Measure_Json(data);
@@ -125,39 +149,48 @@ void loop() {
       Serial.println("Failed to connect");
       return;
     }
-  }
-  if (!currentFWSent) {
-    currentFWSent = ota.Firmware_Send_Info(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION);
-  }
-  if (!updateRequestSent) {
-    Serial.print(CURRENT_FIRMWARE_TITLE);
-    Serial.println(CURRENT_FIRMWARE_VERSION);
-    Serial.println("Firwmare Update ...");
-    const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
-    updateRequestSent = ota.Start_Firmware_Update(callback);
-    if(updateRequestSent) {
-      delay(500);
+    if (!currentFWSent) {
+      currentFWSent = ota.Firmware_Send_Info(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION);
+    }
+    if (!updateRequestSent) {
+      Serial.print(CURRENT_FIRMWARE_TITLE);
+      Serial.println(CURRENT_FIRMWARE_VERSION);
+      const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
       Serial.println("Firwmare Update Subscription...");
       updateRequestSent = ota.Subscribe_Firmware_Update(callback);
+      if(updateRequestSent) xTaskCreate(checkForUpdate, "CheckUpdate", 2048, NULL, 5, NULL);
     }
-  }
-  if (!shared_update_subscribed){
-    Serial.println("Subscribing for shared attribute updates...");
-    const Shared_Attribute_Callback<MAX_ATTRIBUTES> callback(&processSharedAttributeUpdate, SHARED_ATTRIBUTES);
-    if (!shared_update.Shared_Attributes_Subscribe(callback)) {
-    Serial.println("Failed to subscribe for shared attribute updates");
-    // continue;
+    if (!rpc_subscribed){
+      Serial.println("Subscribing for RPC...");
+      const RPC_Callback callbacks[MAX_RPC_SUBSCRIPTIONS]= {
+          {"rpc_method", handleRequest}
+      };
+      if (!rpc.RPC_Subscribe(callbacks + 0U, callbacks + MAX_RPC_SUBSCRIPTIONS)) {
+          Serial.println("Failed to subscribe for RPC");
+          // continue;
+      }
+      Serial.println("Subscribe done");
+      rpc_subscribed = true;
     }
-    Serial.println("Subscribe done");
-    shared_update_subscribed = true;
-  }
-  if (!requestedShared) {
-    Serial.println("Requesting shared attributes...");
-    const Attribute_Request_Callback<MAX_ATTRIBUTES> sharedCallback(&processSharedAttributeRequest, REQUEST_TIMEOUT_MICROSECONDS, &requestTimedOut, SHARED_ATTRIBUTES);
-    requestedShared = attr_request.Shared_Attributes_Request(sharedCallback);
+    if (!shared_update_subscribed){
+      Serial.println("Subscribing for shared attribute updates...");
+      const Shared_Attribute_Callback<MAX_ATTRIBUTES> callback(&processSharedAttributeUpdate, SHARED_ATTRIBUTES);
+      if (!shared_update.Shared_Attributes_Subscribe(callback)) {
+      Serial.println("Failed to subscribe for shared attribute updates");
+      // continue;
+      }
+      Serial.println("Subscribe done");
+      shared_update_subscribed = true;
+    }
     if (!requestedShared) {
-      Serial.println("Failed to request shared attributes");
+      Serial.println("Requesting shared attributes...");
+      const Attribute_Request_Callback<MAX_ATTRIBUTES> sharedCallback(&processSharedAttributeRequest, REQUEST_TIMEOUT_MICROSECONDS, &requestTimedOut, SHARED_ATTRIBUTES);
+      requestedShared = attr_request.Shared_Attributes_Request(sharedCallback);
+      if (!requestedShared) {
+        Serial.println("Failed to request shared attributes");
+      }
     }
-  }  
+  }
+  
 tb.loop();
 }
