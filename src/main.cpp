@@ -1,196 +1,113 @@
-#define CONFIG_THINGSBOARD_ENABLE_DEBUG false
-#include <WiFi.h>
-#include <Arduino_MQTT_Client.h>
-#include <OTA_Firmware_Update.h>
-#include <ThingsBoard.h>
-#include <Server_Side_RPC.h>
-#include <Shared_Attribute_Update.h>
-#include <Attribute_Request.h>
-#include <Espressif_Updater.h>
-//Shared Attributes Configuration
-constexpr uint8_t MAX_ATTRIBUTES = 1;
-constexpr std::array<const char*, MAX_ATTRIBUTES> 
-SHARED_ATTRIBUTES = 
-{
-  "POWER"
-};
-// Firmware title and version used to compare with remote version, to check if an update is needed.
-// Title needs to be the same and version needs to be different --> downgrading is possible
-constexpr char CURRENT_FIRMWARE_TITLE[] = "TEST";
-constexpr char CURRENT_FIRMWARE_VERSION[] = "0.0.0";
-// Maximum amount of retries we attempt to download each firmware chunck over MQTT
-constexpr uint8_t FIRMWARE_FAILURE_RETRIES = 12U;
-// Size of each firmware chunck downloaded over MQTT,
-// increased packet size, might increase download speed
-constexpr uint16_t FIRMWARE_PACKET_SIZE = 32768U;
-//RPC configuration
-constexpr uint8_t MAX_RPC_SUBSCRIPTIONS = 1U;
-constexpr uint8_t MAX_RPC_RESPONSE = 5U;
-constexpr char CONNECTING_MSG[] = "Connecting to: (%s) with token (%s)";
-constexpr char RPC_METHOD[] = "rpc_method";
+// #include "tasks/thingsboard_task.h"
+// void setup() {
+//   // Initalize serial connection for debugging
+//   Serial.begin(SERIAL_DEBUG_BAUD);
+//   delay(1000);
+//   xTaskCreate(thingsboard_task, "thingsboard", 16384, NULL, 10, NULL);
+// }
+// void loop() {
 
-constexpr char WIFI_SSID[] = "HYPERION";
-constexpr char WIFI_PASSWORD[] = "trung2004";
-constexpr char TOKEN[] = " ";
-constexpr char THINGSBOARD_SERVER[] = "app.coreiot.io";
-constexpr uint16_t THINGSBOARD_PORT = 1883U;
-constexpr uint16_t MAX_MESSAGE_SEND_SIZE = 512U;
-constexpr uint16_t MAX_MESSAGE_RECEIVE_SIZE = 512U;
-constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
-constexpr uint64_t REQUEST_TIMEOUT_MICROSECONDS = 10000U * 1000U;
-void requestTimedOut() {
-  Serial.printf("Attribute request timed out did not receive a response in (%llu) microseconds. Ensure client is connected to the MQTT broker and that the keys actually exist on the target device\n", REQUEST_TIMEOUT_MICROSECONDS);
+// }
+#include <Arduino.h>
+#include "config.h"
+#include "global.h"
+#ifdef USE_MQTT
+#include "tasks/thingsboard_task.h"
+#endif
+#ifdef DHT_PIN
+#include "tasks/dht_task.h"
+#endif //DHT_PIN
+#ifdef USE_DHT20
+#include "tasks/dht20_task.h"
+#endif
+#ifdef RGB_PIN
+#include "FastLED.h"
+CRGB leds[4];
+void updateRGB(){
+  FastLED.showColor(shared.rgb_bright >0 ?CRGB::White : CRGB::Black);
+  FastLED.setBrightness(shared.rgb_bright);
 }
-// Initialize underlying client, used to establish a connection
-WiFiClient espClient;
-// Initalize the Mqtt client instance
-Arduino_MQTT_Client mqttClient(espClient);
-// Initialize used apis
-Server_Side_RPC<MAX_RPC_SUBSCRIPTIONS, MAX_RPC_RESPONSE> rpc;
-Shared_Attribute_Update<1U, MAX_ATTRIBUTES> shared_update;
-Attribute_Request<2U, MAX_ATTRIBUTES> attr_request;
-OTA_Firmware_Update<> ota;
-const std::array<IAPI_Implementation*, 4U> apis = {
-    &rpc,
-    &shared_update,
-    &attr_request,
-    &ota
-};
-// Initialize ThingsBoard instance with the maximum needed buffer size
-ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Default_Max_Stack_Size, apis);
-// Initalize the Updater client instance used to flash binary to flash memory
-Espressif_Updater<> updater;
-// Statuses for updating
-bool rpc_subscribed = false;
-bool shared_update_subscribed = false;
-bool currentFWSent = false;
-bool updateRequestSent = false;
-bool requestedShared = false;
-void InitWiFi() {
-  Serial.println("Connecting to AP ...");
-  // Attempting to establish a connection to the given WiFi network
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    // Delay 500ms until a connection has been successfully established
-    delay(500);
-    Serial.print(".");
+#endif
+#ifdef USE_LCD1602
+#include "LiquidCrystal_I2C.h"
+LiquidCrystal_I2C lcd(0x21, 16, 2);
+void lcd1602_task(void * pvParameters){
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0,0);
+  lcd.print("Hello, World");
+  delay(1000);
+  char line1[20];
+  char line2[20];
+  lcd.clear();
+  for(;;){
+    lcd.setCursor(0, 0);
+    sprintf(line1, "Temp:%.1f", telemetry.temperature);
+    lcd.print(line1);
+    sprintf(line2, "Humi:%.1f", telemetry.humidity);
+    lcd.setCursor(0, 1);
+    lcd.print(line2);
+    delay(1000);
   }
-  Serial.println("Connected to AP");
 }
-bool reconnect() {
-  // Check to ensure we aren't connected yet
-  const wl_status_t status = WiFi.status();
-  if (status == WL_CONNECTED) {
-    return true;
+#endif
+// put function declarations here:
+#ifdef ADC_LIGHT_PIN
+void light_task(void * pvParameter){
+  while(1){
+    vTaskDelay(2000);
+    telemetry.light_value = map(analogRead(ADC_LIGHT_PIN),0, 4095, 0, 100);
   }
-
-  // If we aren't establish a new connection to the given WiFi network
-  InitWiFi();
-  return true;
 }
-void update_starting_callback() {
-}
-void finished_callback(const bool & success) {
-  if (success) {
-    Serial.println("Done, Reboot now");
-    esp_restart();
-    return;
+#endif
+#ifdef ADC_MOIS_PIN
+void mois_task(void * pvParameter){
+  while(1){
+    vTaskDelay(2000);
+    telemetry.soil_moisture = map(analogRead(ADC_MOIS_PIN),0, 4095, 0, 100);
   }
-  Serial.println("Downloading firmware failed");
 }
-void progress_callback(const size_t & current, const size_t & total) {
-  Serial.printf("Progress %.2f%%\n", static_cast<float>(current * 100U) / total);
-}
-void checkForUpdate(void * pvParameters){
-  vTaskDelay(30000);
-  const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
-  Serial.println("Firwmare Update ...");
-  ota.Start_Firmware_Update(callback);
-  vTaskDelete(NULL);
-}
-void handleRequest(const JsonVariantConst &data, JsonDocument &response){
-  Serial.println("Received a RPC request");
-  //Info
-  const size_t jsonSize = Helper::Measure_Json(data);
-  char buffer[jsonSize];
-  serializeJson(data, buffer, jsonSize);
-  Serial.println(buffer);
-}
-void processSharedAttributeUpdate(const JsonObjectConst &data) {
-  //Info
-  const size_t jsonSize = Helper::Measure_Json(data);
-  char buffer[jsonSize];
-  serializeJson(data, buffer, jsonSize);
-  Serial.println(buffer);
-}
+#endif
 void setup() {
-  // Initalize serial connection for debugging
   Serial.begin(SERIAL_DEBUG_BAUD);
-  delay(1000);
-  InitWiFi();
+  // Serial1.begin(SERIAL_BAUD, SERIAL_8N1, 6, 7);
+#ifdef LED_PIN
+  pinMode(LED_PIN, OUTPUT);
+#endif
+#ifdef USE_I2C
+  Wire.begin(I2C_SDA,I2C_SCL);
+#endif
+#ifdef PUMP1_PIN
+  pinMode(PUMP1_PIN, OUTPUT);
+#endif
+#ifdef PUMP2_PIN
+  pinMode(PUMP2_PIN, OUTPUT);
+#endif
+#ifdef USE_MQTT
+  xTaskCreate(thingsboard_task, "MQTT", 16384, NULL, 10, NULL);
+#endif
+#ifdef DHT_PIN
+  xTaskCreate(dht_task, "TempHumiSensor", 2048, NULL, 2, NULL);
+#endif //DHT_PIN
+#ifdef USE_DHT20
+  xTaskCreate(dht20_task, "DHT20", 4096, NULL, 2, NULL);
+#endif
+#ifdef ADC_LIGHT_PIN
+  xTaskCreate(light_task, "Light", 1024, NULL, 2, NULL);
+#endif
+#ifdef ADC_MOIS_PIN
+  xTaskCreate(mois_task, "Mois", 1024, NULL, 2, NULL);
+#endif
+#ifdef RGB_PIN
+FastLED.addLeds<NEOPIXEL, RGB_PIN>(leds, 4); 
+#endif
+#ifdef USE_LCD1602
+  xTaskCreate(lcd1602_task, "LCD1602", 2048, NULL, 2, NULL);
+#endif
 }
-void processSharedAttributeRequest(const JsonObjectConst &data) {
-  //Info
-  const size_t jsonSize = Helper::Measure_Json(data);
-  char buffer[jsonSize];
-  serializeJson(data, buffer, jsonSize);
-  Serial.println(buffer);
-}
+
 void loop() {
-  delay(1000);
-  if (!reconnect()) {
-    return;
-  }
-  if (!tb.connected()) {
-    // Reconnect to the ThingsBoard server,
-    // if a connection was disrupted or has not yet been established
-    Serial.printf("Connecting to: (%s) with token (%s)\n", THINGSBOARD_SERVER, TOKEN);
-    if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
-      Serial.println("Failed to connect");
-      return;
-    }
-    if (!currentFWSent) {
-      currentFWSent = ota.Firmware_Send_Info(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION);
-    }
-    if (!updateRequestSent) {
-      Serial.print(CURRENT_FIRMWARE_TITLE);
-      Serial.println(CURRENT_FIRMWARE_VERSION);
-      const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
-      Serial.println("Firwmare Update Subscription...");
-      updateRequestSent = ota.Subscribe_Firmware_Update(callback);
-      if(updateRequestSent) xTaskCreate(checkForUpdate, "CheckUpdate", 2048, NULL, 5, NULL);
-    }
-    if (!rpc_subscribed){
-      Serial.println("Subscribing for RPC...");
-      const RPC_Callback callbacks[MAX_RPC_SUBSCRIPTIONS]= {
-          {"rpc_method", handleRequest}
-      };
-      if (!rpc.RPC_Subscribe(callbacks + 0U, callbacks + MAX_RPC_SUBSCRIPTIONS)) {
-          Serial.println("Failed to subscribe for RPC");
-          // continue;
-      }
-      Serial.println("Subscribe done");
-      rpc_subscribed = true;
-    }
-    if (!shared_update_subscribed){
-      Serial.println("Subscribing for shared attribute updates...");
-      const Shared_Attribute_Callback<MAX_ATTRIBUTES> callback(&processSharedAttributeUpdate, SHARED_ATTRIBUTES);
-      if (!shared_update.Shared_Attributes_Subscribe(callback)) {
-      Serial.println("Failed to subscribe for shared attribute updates");
-      // continue;
-      }
-      Serial.println("Subscribe done");
-      shared_update_subscribed = true;
-    }
-    if (!requestedShared) {
-      Serial.println("Requesting shared attributes...");
-      const Attribute_Request_Callback<MAX_ATTRIBUTES> sharedCallback(&processSharedAttributeRequest, REQUEST_TIMEOUT_MICROSECONDS, &requestTimedOut, SHARED_ATTRIBUTES);
-      requestedShared = attr_request.Shared_Attributes_Request(sharedCallback);
-      if (!requestedShared) {
-        Serial.println("Failed to request shared attributes");
-      }
-    }
-  }
-  
-tb.loop();
+  // put your main code here, to run repeatedly:
+
 }
+
